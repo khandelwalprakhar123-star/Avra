@@ -1,7 +1,7 @@
 {
   "name": "wcardv1",
   "version": "1.1.0",
-  "description": "Tiro v1.1 — WhatsApp → Gemini (Nano Banana) image generator. One-shot, reference-image aware. No retrieval, no database, no art direction.",
+  "description": "wcgen v1.1 — WhatsApp → Gemini (Nano Banana) image generator. One-shot, reference-image aware. No retrieval, no database, no art direction.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

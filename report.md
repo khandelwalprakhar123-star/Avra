@@ -1,14 +1,14 @@
-# Tiro / WhatsApp Card Bot — Full Technical Report
+# wcgen / WhatsApp Card Bot — Full Technical Report
 
 **Report date:** 2026-07-15
-**This folder:** `wcardv1/` — the code for the **v1.1 release** (one-shot image generation)
+**This folder:** `wcardv1/` — the code for the **v1.1 release** (image generation + reply-to-edit loop)
 **Parent project:** `/Users/humptydumpty/whatsapp-card-bot` — the full product (Tool A + Tool B + art direction)
 
 ---
 
 ## 1. What the product is
 
-A WhatsApp bot ("Tiro") that generates Indian festive invitation/greeting cards. A user messages
+A WhatsApp bot ("wcgen") that generates Indian festive invitation/greeting cards. A user messages
 a WhatsApp number, describes the card they want (optionally attaching reference photos), and gets
 back an AI-generated card image. Under the hood every card is drawn by **Google Gemini's image
 model** (`gemini-3.1-flash-lite-image`, nicknamed **"Nano Banana Lite"**).
@@ -29,7 +29,7 @@ real cards, art-directs the generation with a bespoke style guide, and supports 
 | Art direction | `lib/artdirect.js` writes a style guide | none |
 | Image model | Gemini Nano Banana Lite | Gemini Nano Banana Lite (identical) |
 | Reference images | catalogue cards chosen by search | **user's own attached photos** |
-| Editing | reply-to-edit loop | **one-shot only** (edit loop = next release) |
+| Editing | reply-to-edit loop | **reply-to-edit loop** (ported from the full product) |
 | State/DB | Supabase Postgres (3 tables) | **none** (Supabase used for image hosting only) |
 | Image hosting | local disk + ngrok | **Supabase Storage bucket** |
 | Spend caps | Postgres ledger (durable) | in-memory counters |
@@ -45,15 +45,22 @@ real cards, art-directs the generation with a bespoke style guide, and supports 
  Twilio ──POST /whatsapp──►  server.js
                               │  1. validate Twilio signature
                               │  2. rate-limit (50/sender/hr · ₹200/day global)
-                              │  3. ack immediately ("working on it…")
-                              │  4. download reference images from Twilio (lib/media.js)
-                              │  5. text + images ──► Gemini Nano Banana (lib/generate.js)
-                              │  6. upload result ──► Supabase Storage (lib/storage.js)
-                              │  7. send public image URL back ──► Twilio ──► user
+                              │  3. what is this pointing at? (lib/session.js)
+                              │       ├─ a reply / warm session ──► EDIT that image
+                              │       └─ neither ────────────────► fresh generation
+                              │  4. ack immediately ("working on it…")
+                              │  5. download reference images from Twilio (lib/media.js)
+                              │  6. editing? fetch the base back (lib/storage.js)
+                              │  7. base + refs + text ──► Gemini Nano Banana (lib/generate.js)
+                              │  8. upload result ──► Supabase Storage (lib/storage.js)
+                              │  9. send public image URL back ──► Twilio ──► user
                               ▼
 ```
 
-Every message is a **fresh, independent generation**. No memory, no sessions, no follow-up context.
+A first message is a **fresh generation**. Replying to an image the bot sent — or sending a bare
+message while the session is still warm (30 min) — **edits** it instead: the previous image is
+fetched back from Supabase and handed to Gemini as the base. Reply `finalize` (or `done`) to close
+it and start fresh. Session state is in memory, so a restart forgets every open image.
 
 ### Files in `wcardv1/`
 
@@ -64,6 +71,7 @@ Every message is a **fresh, independent generation**. No memory, no sessions, no
 | `lib/media.js` | **New for v1.1.** Downloads the user's attached images from Twilio's authenticated media URLs. |
 | `lib/storage.js` | Uploads each generated image to a public Supabase Storage bucket, returns the URL Twilio fetches. |
 | `lib/ratelimit.js` | In-memory per-sender + global-daily spend caps. |
+| `lib/session.js` | **New for v1.1.** The edit loop's memory: which image a reply points at, session warmth, branching, finality. Pure logic — driveable without a phone. |
 | `.env` | All secrets (pasted below in §8). |
 | `.env.example` | Template with every variable documented. |
 | `package.json` | 4 runtime deps: `@google/genai`, `@supabase/supabase-js`, `express`, `twilio` (+ `dotenv`). |
@@ -202,15 +210,19 @@ npm start                        # boots on PORT (default 3000)
 Then point the Twilio WhatsApp sandbox's "when a message comes in" webhook at
 `https://<your-ngrok>/whatsapp` and message the sandbox number. Send text, or text + photos.
 
-**Roadmap (next release):** reply-to-edit loop (multi-turn refinement) and a durable spend ledger.
-Both were intentionally deferred out of v1.1.
+**Roadmap (next release):** a durable spend ledger + session store (Postgres), replacing the
+in-memory maps that a restart wipes.
 
 ---
 
 ## 7. Known limitations of v1.1 (by design)
-- **No memory / no editing.** Every message is one-shot. Replying to a card starts a fresh generation.
+- **Editing is in-memory only.** A restart (or `node --watch` on file save) forgets every open
+  image, so a reply after one lands as a brand-new generation instead of an edit.
 - **In-memory spend caps.** Restarting the server (or `node --watch` on file save) resets the day's
-  count, and a second process keeps its own tally. Durable ledger comes with the edit-loop release.
+  count, and a second process keeps its own tally. The ₹/day cap also multiplies a *fixed* ₹/gen
+  estimate (`COST_PER_GEN_INR`) rather than observing the real Gemini bill.
+- **No eviction.** `sessions` / `sidToCard` / `closedCards` grow for the life of the process. They
+  hold URLs and ids, not image bytes, so this is slow — but it is unbounded.
 - **No webhook dedup.** Without the Postgres `inbound_messages` guard, a Twilio redelivery *could*
   double-generate. Mitigated by the immediate 200 ack (redelivery is rare), not eliminated.
 - **Image type support** is whatever Gemini accepts (PNG/JPEG/WebP). Exotic uploads (HEIC) may fail.
@@ -238,7 +250,7 @@ OPENAI_API_KEY=<in wcardv1/.env>   # carried for parity; UNUSED by v1.1
 # Spend caps (in-memory; see lib/ratelimit.js)
 MAX_PER_SENDER_PER_HOUR=50
 MAX_GLOBAL_INR_PER_DAY=200
-COST_PER_GEN_INR=3
+COST_PER_GEN_INR=3.2
 MAX_REFERENCES=6
 ```
 
