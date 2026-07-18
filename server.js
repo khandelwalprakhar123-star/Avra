@@ -12,9 +12,9 @@
 //   • no catalogue search / embeddings (Tool B)
 //   • no clarifying questions / conversation state machine (Tool A)
 //   • no art-direction style guide
-//   • no database — Supabase is image hosting only, no tables. Session state lives in memory, so a
-//     restart forgets every open image and the user starts fresh. Durable state is the full
-//     product's Postgres (lib/store.js), and is the same roadmap item as the durable spend ledger.
+//   • no catalogue database — Supabase now holds the edit-loop state (db/schema.sql) so replies
+//     survive a restart, but there are still no product tables (catalogue, users, spend ledger).
+//     The spend ledger is still in memory (lib/ratelimit.js) — the same roadmap item as Postgres.
 
 require('dotenv').config();
 
@@ -79,14 +79,14 @@ app.post('/whatsapp', requireTwilioSignature, async (req, res) => {
   // The SID of the image the user swiped-to-reply on, if any. This is the same SID Twilio handed
   // back when we sent that image, which is what makes the reply resolvable.
   const repliedSid = req.body.OriginalRepliedMessageSid;
-  const { ref, base, refIsFinal } = session.resolveTarget(from, repliedSid);
+  const { ref, base, refIsFinal } = await session.resolveTarget(from, repliedSid);
 
   console.log(
     `Message from ${from}: ${promptText || '(no text)'}` +
       `${numMedia ? ` [+${numMedia} media]` : ''}${ref ? ' [reply]' : ''}`
   );
 
-  if (session.isFinalize(promptText)) return finalize(res, from, ref, base, refIsFinal);
+  if (session.isFinalize(promptText)) return await finalize(res, from, ref, base, refIsFinal);
 
   // Nothing to work with.
   if (!promptText && !numMedia) {
@@ -125,10 +125,9 @@ app.post('/whatsapp', requireTwilioSignature, async (req, res) => {
     // build on an image that was never sent — and a degenerate response would poison the session
     // (see the MIN_CARD_BYTES guard in lib/generate.js).
     const target = editing
-      ? session.resolveSession(from, refIsFinal ? null : ref, base)
-      : session.newSession(from);
-    target.versions.push(version);
-    target.lastActivity = Date.now();
+      ? await session.resolveSession(from, refIsFinal ? null : ref, base)
+      : await session.newSession(from);
+    await session.appendVersion(from, target, version);
 
     await sendCard(from, target, version);
   } catch (err) {
@@ -137,16 +136,21 @@ app.post('/whatsapp', requireTwilioSignature, async (req, res) => {
   }
 });
 
-function finalize(res, from, ref, base, refIsFinal) {
+async function finalize(res, from, ref, base, refIsFinal) {
   const twiml = new twilio.twiml.MessagingResponse();
 
-  if (refIsFinal) {
-    twiml.message('That one is already finalized ✅ Send a new prompt any time to start fresh.');
-  } else if (!session.closeCard(from, ref, base)) {
-    twiml.message("Nothing to finalize yet — send me a prompt and I'll make you an image.");
-  } else {
-    console.log(`✅ Finalized image for ${from}`);
-    twiml.message('✅ Finalized! Send a new prompt any time to start fresh.');
+  try {
+    if (refIsFinal) {
+      twiml.message('That one is already finalized ✅ Send a new prompt any time to start fresh.');
+    } else if (!(await session.closeCard(from, ref, base))) {
+      twiml.message("Nothing to finalize yet — send me a prompt and I'll make you an image.");
+    } else {
+      console.log(`✅ Finalized image for ${from}`);
+      twiml.message('✅ Finalized! Send a new prompt any time to start fresh.');
+    }
+  } catch (err) {
+    console.error(`❌ Finalize failed [status=${err.status ?? 'n/a'}]:`, err.message);
+    twiml.message('Sorry, something went wrong. Try again?');
   }
 
   res.type('text/xml').send(twiml.toString());
@@ -167,7 +171,7 @@ async function sendCard(from, target, version) {
 
   // The SID Twilio returns here is the same one that comes back as OriginalRepliedMessageSid when
   // the user replies to this image. This is the whole hinge of the edit loop.
-  session.recordSent(message.sid, from, target.cardId, version);
+  await session.recordSent(message.sid, from, target.cardId, version);
   console.log(`📤 Sent v${n} (${message.sid}) to ${from}: ${version.url}`);
 }
 
@@ -185,13 +189,23 @@ async function notify(from, body) {
   }
 }
 
-app.listen(PORT, () => {
-  console.log(`wcgen v1.1 listening on port ${PORT}`);
-  if (!VALIDATE_SIGNATURE) {
-    console.warn(
-      '⚠️  TWILIO SIGNATURE VALIDATION IS OFF (VALIDATE_TWILIO_SIGNATURE=false).\n' +
-        '   /whatsapp will accept any POST and generate images against your Gemini key.\n' +
-        '   Never run this way with a public URL.'
-    );
-  }
-});
+// Fail loudly on boot if the edit-loop tables are missing — a deploy that skipped db/schema.sql
+// would otherwise look healthy and silently drop every reply back to brand-new generation.
+session
+  .assertSchema()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`wcgen v1.1 listening on port ${PORT}`);
+      if (!VALIDATE_SIGNATURE) {
+        console.warn(
+          '⚠️  TWILIO SIGNATURE VALIDATION IS OFF (VALIDATE_TWILIO_SIGNATURE=false).\n' +
+            '   /whatsapp will accept any POST and generate images against your Gemini key.\n' +
+            '   Never run this way with a public URL.'
+        );
+      }
+    });
+  })
+  .catch((err) => {
+    console.error(`❌ ${err.message}`);
+    process.exit(1);
+  });
