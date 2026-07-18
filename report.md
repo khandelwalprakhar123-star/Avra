@@ -148,7 +148,7 @@ and sends outbound text + images back via its REST API. Key facts the code is bu
 
 ### ngrok — the public tunnel *(used by both, for the webhook)*
 Exposes the local Express server to the internet over a stable HTTPS URL
-(`https://durably-sequester-prior.ngrok-free.dev`) so Twilio can reach the webhook. `PUBLIC_BASE_URL`
+(`https://<your-subdomain>.ngrok-free.dev`) so Twilio can reach the webhook. `PUBLIC_BASE_URL`
 must be this exact URL because Twilio's signature is computed over it. In the full product ngrok *also*
 served the generated images; in v1.1 it only carries the webhook (images live on Supabase).
 
@@ -245,7 +245,7 @@ PORT=3000
 SUPABASE_URL=<in wcardv1/.env>
 SUPABASE_SERVICE_ROLE_KEY=<in wcardv1/.env — service-role JWT, server-side only>
 SUPABASE_BUCKET=cards
-OPENAI_API_KEY=<in wcardv1/.env>   # carried for parity; UNUSED by v1.1
+# OPENAI_API_KEY — removed; v1.1 does not use OpenAI. Add back only if you wire up the full product.
 
 # Spend caps (in-memory; see lib/ratelimit.js)
 MAX_PER_SENDER_PER_HOUR=50
