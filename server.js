@@ -47,7 +47,7 @@ for (const [name, value] of Object.entries({
   SUPABASE_SERVICE_ROLE_KEY,
   PUBLIC_BASE_URL,
 })) {
-  if (!value) throw new Error(`Missing required env var: ${name}. See .env.example`);
+  if (!value) throw new Error(`Missing required env var: ${name}. Set it in .env before starting.`);
 }
 
 const { generate } = require('./lib/generate');
