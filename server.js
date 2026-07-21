@@ -1,10 +1,10 @@
 // wcgen v1.1 — the whole harness.
 //
 // A WhatsApp message (text, and/or attached reference images) comes in via Twilio; it goes to
-// Gemini's image model (Nano Banana Lite); the generated image is uploaded to Supabase Storage and
+// OpenAI's image model (gpt-image-2); the generated image is uploaded to Supabase Storage and
 // sent back. Replying to an image edits it, so refinement is a back-and-forth rather than a reroll.
 //
-//   Twilio ──POST /whatsapp──► [ rate-limit ] ──► [ download refs ] ──► Gemini ──► Supabase ──► Twilio
+//   Twilio ──POST /whatsapp──► [ rate-limit ] ──► [ download refs ] ──► OpenAI ──► Supabase ──► Twilio
 //                                   │
 //                                   └─ replying to an image? ─► fetch it from Supabase ─► edit it
 //
@@ -21,6 +21,35 @@ require('dotenv').config();
 const express = require('express');
 const twilio = require('twilio');
 
+const {
+  TWILIO_ACCOUNT_SID,
+  TWILIO_AUTH_TOKEN,
+  TWILIO_WHATSAPP_FROM,
+  OPENAI_API_KEY,
+  SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY,
+  PUBLIC_BASE_URL,
+  PORT = 3000,
+} = process.env;
+
+// Fail loudly on boot, not on the first user's message.
+//
+// This runs BEFORE the ./lib requires below, and that order is load-bearing: each of those modules
+// builds its client at module load (lib/generate.js constructs the OpenAI client, lib/storage.js and
+// lib/session.js construct Supabase clients). Required after them, a missing OPENAI_API_KEY surfaces
+// as a raw "Missing credentials" stack trace from inside the SDK instead of the message below.
+for (const [name, value] of Object.entries({
+  TWILIO_ACCOUNT_SID,
+  TWILIO_AUTH_TOKEN,
+  TWILIO_WHATSAPP_FROM,
+  OPENAI_API_KEY,
+  SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY,
+  PUBLIC_BASE_URL,
+})) {
+  if (!value) throw new Error(`Missing required env var: ${name}. See .env.example`);
+}
+
 const { generate } = require('./lib/generate');
 const { uploadCard, fetchCard } = require('./lib/storage');
 const { downloadReferences } = require('./lib/media');
@@ -30,37 +59,13 @@ const session = require('./lib/session');
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 
-const {
-  TWILIO_ACCOUNT_SID,
-  TWILIO_AUTH_TOKEN,
-  TWILIO_WHATSAPP_FROM,
-  GEMINI_API_KEY,
-  SUPABASE_URL,
-  SUPABASE_SERVICE_ROLE_KEY,
-  PUBLIC_BASE_URL,
-  PORT = 3000,
-} = process.env;
-
-// Fail loudly on boot, not on the first user's message.
-for (const [name, value] of Object.entries({
-  TWILIO_ACCOUNT_SID,
-  TWILIO_AUTH_TOKEN,
-  TWILIO_WHATSAPP_FROM,
-  GEMINI_API_KEY,
-  SUPABASE_URL,
-  SUPABASE_SERVICE_ROLE_KEY,
-  PUBLIC_BASE_URL,
-})) {
-  if (!value) throw new Error(`Missing required env var: ${name}. See .env.example`);
-}
-
 const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
 // The edit loop's state and its rules live in lib/session.js, so they can be exercised without a
-// phone. This file stays what it always was: the glue between Twilio, Gemini, and Supabase.
+// phone. This file stays what it always was: the glue between Twilio, OpenAI, and Supabase.
 
 // Twilio signs every webhook with the auth token. Without this check the endpoint is a public,
-// unauthenticated image generator: anyone who finds the URL can spend your Gemini credits in a
+// unauthenticated image generator: anyone who finds the URL can spend your OpenAI credits in a
 // loop. Twilio computes the signature over the exact URL it called, so it must be built from
 // PUBLIC_BASE_URL — behind ngrok, req.protocol/req.host are the local tunnel and the hash won't
 // match. VALIDATE_TWILIO_SIGNATURE=false is the escape hatch for local curl testing only.
@@ -98,8 +103,8 @@ app.post('/whatsapp', requireTwilioSignature, async (req, res) => {
     );
   }
 
-  const refusal = ratelimit.check(from);
-  if (refusal) return sayTwiml(res, refusal);
+  const gate = ratelimit.check(from);
+  if (gate.refusal) return sayTwiml(res, gate.refusal);
 
   // Ack IMMEDIATELY, then work asynchronously. Twilio's webhook read timeout is 15s and it does
   // not retry a timeout by default — it just fails with error 11200 and the user gets nothing.
@@ -117,7 +122,8 @@ app.post('/whatsapp', requireTwilioSignature, async (req, res) => {
     const references = numMedia ? await downloadReferences(req.body) : [];
     const baseImage = editing ? await fetchCard(base.url) : null;
 
-    const { bytes, mimeType } = await generate({ prompt: promptText, references, base: baseImage });
+    const { bytes, mimeType, cost } = await generate({ prompt: promptText, references, base: baseImage });
+    gate.settle(cost?.inr); // charge the real token-based cost against the day's budget
     const url = await uploadCard(bytes, mimeType);
     const version = { url, mimeType, prompt: promptText };
 
@@ -131,6 +137,9 @@ app.post('/whatsapp', requireTwilioSignature, async (req, res) => {
 
     await sendCard(from, target, version);
   } catch (err) {
+    // Settle the reservation with whatever OpenAI actually billed: a degenerate-but-charged image
+    // carries its real cost on err.cost; a call that failed before billing refunds to ₹0.
+    gate.settle(err.cost?.inr ?? 0);
     console.error(`❌ ${editing ? 'Edit' : 'Generation'} failed [status=${err.status ?? 'n/a'}]:`, err.message);
     await notify(from, 'Sorry, something went wrong generating that. Try again?');
   }
@@ -199,7 +208,7 @@ session
       if (!VALIDATE_SIGNATURE) {
         console.warn(
           '⚠️  TWILIO SIGNATURE VALIDATION IS OFF (VALIDATE_TWILIO_SIGNATURE=false).\n' +
-            '   /whatsapp will accept any POST and generate images against your Gemini key.\n' +
+            '   /whatsapp will accept any POST and generate images against your OpenAI key.\n' +
             '   Never run this way with a public URL.'
         );
       }

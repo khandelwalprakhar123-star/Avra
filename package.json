@@ -1,7 +1,7 @@
 {
   "name": "wcardv1",
   "version": "1.1.0",
-  "description": "wcgen v1.1 — WhatsApp → Gemini (Nano Banana) image generator. One-shot, reference-image aware. No retrieval, no database, no art direction.",
+  "description": "wcgen v1.1 — WhatsApp → OpenAI (gpt-image-2) image generator. One-shot, reference-image aware. No retrieval, no catalogue, no art direction.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -12,10 +12,10 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "@google/genai": "^2.10.0",
     "@supabase/supabase-js": "^2.110.2",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "openai": "^6.48.0",
     "twilio": "^6.0.2"
   }
 }
