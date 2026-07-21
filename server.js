@@ -86,8 +86,12 @@ app.post('/whatsapp', requireTwilioSignature, async (req, res) => {
   const repliedSid = req.body.OriginalRepliedMessageSid;
   const { ref, base, refIsFinal } = await session.resolveTarget(from, repliedSid);
 
+  // Log the inbound SID. A webhook Twilio could not deliver (tunnel down, error 11200) leaves no
+  // trace here at all — Twilio does not retry it. Recording the SID of everything that DID arrive is
+  // what makes those gaps findable afterwards: compare this log against Twilio's message list and
+  // any inbound SID missing here was lost in transit, not mishandled by this server.
   console.log(
-    `Message from ${from}: ${promptText || '(no text)'}` +
+    `Message from ${from} [${req.body.MessageSid || 'no-sid'}]: ${promptText || '(no text)'}` +
       `${numMedia ? ` [+${numMedia} media]` : ''}${ref ? ' [reply]' : ''}`
   );
 
@@ -108,13 +112,19 @@ app.post('/whatsapp', requireTwilioSignature, async (req, res) => {
 
   // Ack IMMEDIATELY, then work asynchronously. Twilio's webhook read timeout is 15s and it does
   // not retry a timeout by default — it just fails with error 11200 and the user gets nothing.
-  // Fetching the base + generating + uploading is ~10-20s, so the image always goes out via the
-  // REST API below, never in the webhook response.
+  // The work below runs far longer than that window, so the image always goes out via the REST API,
+  // never in the webhook response.
+  //
+  // The two acks quote different times because the two paths genuinely differ. A fresh generation
+  // is ~20s. An edit fetches the base back from Supabase and uploads it into images.edit as an
+  // input, making it a bigger request in both directions: measured edits run 75-90s. Quoting
+  // "15-20 seconds" for both taught users to read a working edit as a failure and re-send it,
+  // which doubled the spend and produced duplicate cards.
   const editing = Boolean(base);
   sayTwiml(
     res,
     editing
-      ? '✏️ Got it, editing your image. Give me ~15-20 seconds...'
+      ? '✏️ Got it, editing your image. Edits take a bit longer, usually a minute or two...'
       : '✨ Working on your image, give me ~15-20 seconds...'
   );
 
@@ -200,8 +210,23 @@ async function notify(from, body) {
 
 // Fail loudly on boot if the edit-loop tables are missing — a deploy that skipped db/schema.sql
 // would otherwise look healthy and silently drop every reply back to brand-new generation.
-session
-  .assertSchema()
+// The env check at the top of this file only proves the variables are non-empty, not that they
+// work. A malformed TWILIO_ACCOUNT_SID boots perfectly happily and then fails three separate ways
+// at message time: reference images 401 and get dropped, the finished card 401s on its way out, and
+// the failure notice 401s too — so the user sees "working on it" and then silence, while every
+// generation is still billed. One authenticated call here turns all of that into a startup error.
+async function assertTwilioCredentials() {
+  try {
+    await twilioClient.api.accounts(TWILIO_ACCOUNT_SID).fetch();
+  } catch (err) {
+    throw new Error(
+      `Twilio rejected these credentials (HTTP ${err.status}, code ${err.code}): ${err.message}. ` +
+        'Check TWILIO_ACCOUNT_SID (AC + 32 hex chars) and TWILIO_AUTH_TOKEN in .env'
+    );
+  }
+}
+
+Promise.all([session.assertSchema(), assertTwilioCredentials()])
   .then(() => {
     app.listen(PORT, () => {
       console.log(`wcgen v1.1 listening on port ${PORT}`);
