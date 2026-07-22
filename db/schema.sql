@@ -40,9 +40,67 @@ create table if not exists closed_cards (
   closed_at  timestamptz not null default now()
 );
 
+-- One row per generation, all senders: the daily spend cap's ledger. Before this it was an array
+-- in the server process, which meant every restart — a deploy, a crash, a `node --watch` reload —
+-- reset the day's total to ₹0. The cap is the only thing bounding the OpenAI bill on a public
+-- sandbox number, so an off-switch anyone could trip by making us redeploy was not a cap at all.
+--
+-- inr is written twice per generation: EST_PER_GEN_INR when the work is reserved, then the real
+-- token-based cost when it settles (or 0 if the call failed before OpenAI billed anything).
+create table if not exists spend_ledger (
+  id        uuid primary key default gen_random_uuid(),
+  phone     text not null,
+  inr       numeric(10, 2) not null,
+  spent_at  timestamptz not null default now()      -- restamped at settle, so the 24h window
+);                                                  -- tracks when the spend actually landed
+create index if not exists spend_ledger_spent_at_idx on spend_ledger (spent_at desc);
+
+-- Reserve budget for one generation, atomically.
+--
+-- In memory, "sum the day, compare, append" was a single uninterruptible step. Across a network it
+-- is three, and two servers (or two requests on one server) can both read ₹198 and both proceed.
+-- The advisory lock restores the old guarantee: reservations for this ledger serialize, so the sum
+-- a caller compares against always includes every reservation that came before it. It is held for
+-- the duration of the transaction only — microseconds — never across the ~40s generation itself.
+--
+-- Returns allowed=false and no row when the day's budget is spent; the caller turns that into a
+-- user-facing refusal.
+create or replace function reserve_spend(p_phone text, p_reserve numeric, p_cap numeric)
+returns table (allowed boolean, entry_id uuid, spent numeric)
+language plpgsql
+as $$
+declare
+  v_spent numeric;
+  v_id    uuid;
+begin
+  perform pg_advisory_xact_lock(hashtext('wcgen_spend_ledger'));
+
+  select coalesce(sum(inr), 0) into v_spent
+    from spend_ledger
+   where spent_at > now() - interval '24 hours';
+
+  -- Round to paise before comparing: the cap is a strict >, and token-derived costs carry long
+  -- floating tails that could otherwise flip a boundary case.
+  if round(v_spent + p_reserve, 2) > p_cap then
+    return query select false, null::uuid, round(v_spent, 2);
+    return;
+  end if;
+
+  insert into spend_ledger (phone, inr) values (p_phone, round(p_reserve, 2)) returning id into v_id;
+  return query select true, v_id, round(v_spent + p_reserve, 2);
+end;
+$$;
+
 -- Lock the front door. RLS on with no policies: the anon/publishable key can neither read nor
 -- write. Only the service role (server-side, never shipped to a browser) gets through — which is
 -- exactly how lib/session.js connects.
 alter table sent_versions enable row level security;
 alter table sessions      enable row level security;
 alter table closed_cards  enable row level security;
+alter table spend_ledger  enable row level security;
+
+-- reserve_spend runs as its caller, so RLS on spend_ledger still applies inside it and the anon key
+-- gains nothing by calling it. Revoke anyway: the function is a server-side entry point, and the
+-- default grant to public is a door with no reason to be open.
+revoke execute on function reserve_spend(text, numeric, numeric) from public, anon, authenticated;
+grant  execute on function reserve_spend(text, numeric, numeric) to service_role;

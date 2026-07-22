@@ -12,9 +12,9 @@
 //   • no catalogue search / embeddings (Tool B)
 //   • no clarifying questions / conversation state machine (Tool A)
 //   • no art-direction style guide
-//   • no catalogue database — Supabase now holds the edit-loop state (db/schema.sql) so replies
-//     survive a restart, but there are still no product tables (catalogue, users, spend ledger).
-//     The spend ledger is still in memory (lib/ratelimit.js) — the same roadmap item as Postgres.
+//   • no catalogue database — Supabase now holds the edit-loop state and the spend ledger
+//     (db/schema.sql), so both survive a restart, but there are still no product tables
+//     (catalogue, users).
 
 require('dotenv').config();
 
@@ -107,7 +107,7 @@ app.post('/whatsapp', requireTwilioSignature, async (req, res) => {
     );
   }
 
-  const gate = ratelimit.check(from);
+  const gate = await ratelimit.check(from);
   if (gate.refusal) return sayTwiml(res, gate.refusal);
 
   // Ack IMMEDIATELY, then work asynchronously. Twilio's webhook read timeout is 15s and it does
@@ -133,7 +133,7 @@ app.post('/whatsapp', requireTwilioSignature, async (req, res) => {
     const baseImage = editing ? await fetchCard(base.url) : null;
 
     const { bytes, mimeType, cost } = await generate({ prompt: promptText, references, base: baseImage });
-    gate.settle(cost?.inr); // charge the real token-based cost against the day's budget
+    await gate.settle(cost?.inr); // charge the real token-based cost against the day's budget
     const url = await uploadCard(bytes, mimeType);
     const version = { url, mimeType, prompt: promptText };
 
@@ -149,7 +149,7 @@ app.post('/whatsapp', requireTwilioSignature, async (req, res) => {
   } catch (err) {
     // Settle the reservation with whatever OpenAI actually billed: a degenerate-but-charged image
     // carries its real cost on err.cost; a call that failed before billing refunds to ₹0.
-    gate.settle(err.cost?.inr ?? 0);
+    await gate.settle(err.cost?.inr ?? 0);
     console.error(`❌ ${editing ? 'Edit' : 'Generation'} failed [status=${err.status ?? 'n/a'}]:`, err.message);
     await notify(from, 'Sorry, something went wrong generating that. Try again?');
   }
@@ -226,7 +226,7 @@ async function assertTwilioCredentials() {
   }
 }
 
-Promise.all([session.assertSchema(), assertTwilioCredentials()])
+Promise.all([session.assertSchema(), ratelimit.assertSchema(), assertTwilioCredentials()])
   .then(() => {
     app.listen(PORT, () => {
       console.log(`wcgen v1.1 listening on port ${PORT}`);
