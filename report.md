@@ -158,7 +158,7 @@ served the generated images; in v1.1 it only carries the webhook (images live on
 - **v1.1** uses Supabase **Storage only** — a public bucket named `cards`. No tables, no rows, no RLS.
   Generated images are uploaded and served from `…/storage/v1/object/public/cards/<uuid>.png`.
 - Access uses the **service role key** (full-database bypass, server-side only, never shipped to a
-  browser). Project: `jrdynzatdtjsxbrprdfi`.
+  browser). Project: ``.
 
 ### Gemini (Google) — the models *(both)*
 One API key, three uses across the product:
