@@ -36,9 +36,9 @@ real cards, art-directs the generation with a bespoke style guide, and supports 
 | Image model | Gemini Nano Banana Lite | **OpenAI `gpt-image-2`** |
 | Reference images | catalogue cards chosen by search | **user's own attached photos** |
 | Editing | reply-to-edit loop | **reply-to-edit loop** (ported from the full product) |
-| State/DB | Supabase Postgres (3 tables: conversations, inbound, spend ledger) | **Supabase Postgres (3 tables: edit-loop state only)** — no catalogue, no spend ledger |
+| State/DB | Supabase Postgres (3 tables: conversations, inbound, spend ledger) | **Supabase Postgres (4 tables: edit-loop state + spend ledger)** — no catalogue, no users |
 | Image hosting | local disk + ngrok | **Supabase Storage bucket** |
-| Spend caps | Postgres ledger (durable) | in-memory ledger, real token-based cost |
+| Spend caps | Postgres ledger (durable) | **Postgres ledger (durable)**, real token-based cost |
 
 ---
 
@@ -54,7 +54,7 @@ real cards, art-directs the generation with a bespoke style guide, and supports 
                               │       ├─ a reply / warm session ──► EDIT that image
                               │       └─ neither ────────────────► fresh generation
                               │  3. "finalize"? close the card, reply, stop
-                              │  4. spend cap: reserve against ₹200/day global
+                              │  4. spend cap: reserve atomically in Postgres (₹200/day global)
                               │  5. ack immediately ("working on it…")
                               │  6. download reference images from Twilio (lib/media.js)
                               │  7. editing? fetch the base back (lib/storage.js)
@@ -81,9 +81,9 @@ across restarts, deploys, and `node --watch` reloads.
 | `lib/pricing.js` | **New.** Turns the `usage` token meters into a real ₹ cost — three separate meters (text in, image in, image out) at their own rates. |
 | `lib/media.js` | **New for v1.1.** Downloads the user's attached images from Twilio's authenticated media URLs. Fails loudly on 401/403 rather than silently degrading to text-only. |
 | `lib/storage.js` | Uploads each generated image to a public Supabase Storage bucket, returns the URL Twilio fetches; fetches a base image back for edits. |
-| `lib/ratelimit.js` | In-memory global daily spend cap, reserve-then-settle against the real billed cost. |
+| `lib/ratelimit.js` | Global daily spend cap, durable in Postgres. Reserve-then-settle against the real billed cost; fails **closed** if the ledger is unreachable. |
 | `lib/session.js` | **New for v1.1.** The edit loop's memory, backed by Postgres: which image a reply points at, session warmth, branching, finality. |
-| `db/schema.sql` | **New.** The three edit-loop tables. Run once in the Supabase SQL editor (see §5). |
+| `db/schema.sql` | **New.** The three edit-loop tables, the `spend_ledger` table, and the `reserve_spend()` function. Run in the Supabase SQL editor; safe to re-run (see §5). |
 | `site/index.html` | The standalone "Aangan" marketing page. Not served by `server.js`. |
 | `.env` | All secrets. Git-ignored. Structure in §8. |
 | `.env.example` | Template with every variable documented, required and optional. |
@@ -102,9 +102,12 @@ across restarts, deploys, and `node --watch` reloads.
   data, the lab (`lab-server.js`), and all the `scripts/`.
 
 ### Verified working (2026-07-22)
-- `node server.js` — boots and listens on the merged `main`. This is a real check, not a smoke test:
-  boot now validates all seven required env vars, makes an authenticated call to the Twilio API, and
-  queries all three Supabase tables before it will listen.
+- `node server.js` — boots and listens. This is a real check, not a smoke test: boot validates all
+  seven required env vars, makes an authenticated call to the Twilio API, queries the three
+  edit-loop tables, and probes `reserve_spend()` before it will listen.
+- Boot correctly **refuses to start** against a project whose `db/schema.sql` predates the spend
+  ledger, naming the missing function and telling you to re-run the file. Confirmed against a real
+  un-migrated project — this is the failure you will hit if you pull without migrating.
 - Dependencies in sync — `openai@6.48.0` installed, `@google/genai` removed.
 - Supabase Storage — bucket `cards` auto-created public; upload + unauthenticated public fetch both
   return 200 with correct `content-type`. (This is the critical dependency: Twilio fetches the image
@@ -178,8 +181,8 @@ served the generated images; in v1.1 it only carries the webhook (images live on
 - **v1.1** uses **both**, in the same project:
   - **Storage** — a public bucket named `cards`, auto-created on boot. Generated images are served
     from `…/storage/v1/object/public/cards/<uuid>.png`.
-  - **Postgres** — three tables holding the edit-loop state (`db/schema.sql`, §5). RLS is enabled
-    with zero policies, so the anon key can read nothing; these tables hold phone numbers.
+  - **Postgres** — four tables: the edit-loop state and the spend ledger (`db/schema.sql`, §5). RLS
+    is enabled with zero policies, so the anon key can read nothing; these tables hold phone numbers.
 - Access uses the **service role key** (full-database bypass, server-side only, never shipped to a
   browser). The project ref is in `SUPABASE_URL` in your local `.env`.
 
@@ -216,13 +219,23 @@ precisely so it can't look healthy while silently dropping every reply back to f
 | `sent_versions` | Every outbound image, keyed by its Twilio message SID. A swipe-to-reply hands that SID back, and this is where the base version is looked up. The hinge of the edit loop. |
 | `sessions` | One row per phone — the image thread that phone currently has open: its version list, `open`/`closed` status, and `last_activity` (compared against the 30-minute edit window). |
 | `closed_cards` | Cards the user has finalized. Finality is tracked **per card, not per session**: a reply still names a version long after its session is gone, and a branched session shares its seed version's lineage. |
+| `spend_ledger` | One row per generation, all senders. `inr` is written twice: `EST_PER_GEN_INR` when the work is reserved, then the real token-based cost when it settles (or 0 if the call failed before OpenAI billed). |
 
-All three are written only by the server with the service-role key. RLS is enabled with **zero
+Plus one function, **`reserve_spend(phone, reserve, cap)`** — the compare-and-reserve for the daily
+budget, which runs in SQL rather than JS. In memory, "sum the day, compare, append" was a single
+uninterruptible step; across a network it is three, and two concurrent requests could both read ₹198
+and both proceed. A `pg_advisory_xact_lock` serialises reservations, held for the transaction only
+(microseconds) and never across the ~40s generation itself. It returns `allowed=false` when the
+budget is spent, and the caller turns that into a user-facing refusal.
+
+All of this is written only by the server with the service-role key. RLS is enabled with **zero
 policies**, so the anon/publishable key can neither read nor write — these tables hold phone numbers.
+`reserve_spend` additionally has its default `public` grant revoked.
 
-These replaced in-memory `Map`s. Before that, a restart forgot every open image, so a reply to
+These replaced in-memory state. Before that, a restart forgot every open image — so a reply to
 yesterday's card (the process had restarted overnight) found nothing and was silently treated as a
-brand-new generation.
+brand-new generation — and reset the day's spend to ₹0, which meant any redeploy silently lifted the
+only ceiling on the OpenAI bill.
 
 ### The full product's schema — *not used by v1.1*
 
@@ -232,7 +245,7 @@ Lives in `../supabase/migrations/0001_conversations.sql`. Three separate tables,
 |---|---|
 | `conversations` | One row per phone. The slot-filling state machine: `status`, retrieval `slots` (the look), `payload` (the print copy), the persisted `candidates` ranking + cursor, and loop guards. A partial unique index enforces one live conversation per phone. |
 | `inbound_messages` | Twilio redelivery guard. `message_sid` is the primary key; a redelivered webhook must not re-extract or re-generate (silent double-spend). |
-| `llm_calls` | The token/spend ledger. Every billable call (extract / embed / generate / art_direct) is logged so a runaway loop is visible before it's expensive. This is what makes the daily budget cap *durable* across restarts — the thing v1.1's in-memory cap still can't do. |
+| `llm_calls` | The token/spend ledger. Every billable call (extract / embed / generate / art_direct) is logged so a runaway loop is visible before it's expensive. v1.1's `spend_ledger` is the same idea, narrowed to the one billable call it makes. |
 
 ### The data assets (full product)
 - `catalog.json` (~554 KB) — the 390 curated cards with their annotations ("index cards").
@@ -260,24 +273,37 @@ Then point the Twilio WhatsApp sandbox's "when a message comes in" webhook at
 `PUBLIC_BASE_URL` must match the live ngrok URL exactly — Twilio's signature is computed over the URL
 it called, so a stale value fails every webhook with a signature mismatch.
 
-**Roadmap (next release):** a durable spend ledger in Postgres, replacing the in-memory ledger that a
-restart wipes. (The session store, which was the other half of this item, shipped in v1.1.)
+> **Upgrading an existing project?** Re-run `db/schema.sql`. It now also creates `spend_ledger` and
+> `reserve_spend()`, and the server refuses to boot without them — a project set up before the ledger
+> landed will fail on startup with a message pointing here. The file is idempotent (`create table if
+> not exists`, `create or replace function`), so re-running it is safe.
+
+**Roadmap:** an automated test suite (see §7) is the next item. Both halves of the previous
+roadmap — the durable session store and the durable spend ledger — have now shipped.
 
 ---
 
 ## 7. Known limitations of v1.1
 - **No automated tests.** There is no test suite, no `test` script, and no CI. The edit-loop rules in
   `lib/session.js` — reply ownership, finality, branching, version identity — are the subtlest logic
-  in the codebase and are currently verified only by reading. `lib/session.js` and `lib/storage.js`
-  each build their Supabase client at module load from `process.env`, so they can't be exercised
-  without live credentials; making them injectable is the prerequisite for testing any of it.
-- **In-memory spend cap.** Restarting the server (or `node --watch` on file save) resets the day's
-  count, and a second process would keep its own tally. The cost itself is now accurate — settled
-  from real token usage rather than a fixed per-generation estimate — but the *ledger* is not durable.
+  in the codebase and are currently verified only by reading — as are the reserve/settle paths in
+  `lib/ratelimit.js`, which now span a network boundary and are where a silent regression costs real
+  money. `lib/session.js`, `lib/storage.js`, and `lib/ratelimit.js` each build their Supabase client
+  at module load from `process.env`, so none can be exercised without live credentials; making them
+  injectable is the prerequisite for testing any of it.
+- **A failed settle over-counts.** `settle()` never throws, by design: it runs mid-`try` on the
+  success path, so a rejected ledger write would be caught by the generation's own error handler and
+  tell the user their finished image failed. The cheaper wrong answer is a stuck reservation — it
+  over-counts the day by a few rupees and expires on its own after 24h.
+- **A ledger outage stops the bot.** `check()` fails **closed**: if Supabase is unreachable the
+  server cannot know what has been spent, so it refuses to generate rather than run uncapped. That
+  is the right trade against an unbounded bill, but it does mean the database is a hard dependency
+  for generating at all, not just for remembering.
 - **No per-sender cap.** The ₹200/day ceiling is global and deliberately has no per-sender
   counterpart, so a single sender on the shared public sandbox number can spend the entire day's
   budget alone.
-- **No eviction.** `sent_versions`, `sessions`, and `closed_cards` grow without bound. They hold URLs
+- **No eviction.** `sent_versions`, `closed_cards`, and `spend_ledger` grow without bound — nothing
+  prunes settled ledger rows once they age past the 24h window. They hold URLs
   and ids rather than image bytes, so growth is slow — but nothing prunes them, and neither does the
   Storage bucket.
 - **No webhook dedup.** Without the full product's `inbound_messages` guard, a Twilio redelivery
