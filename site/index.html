@@ -442,6 +442,20 @@
   .foot-links a { text-decoration: none; transition: color .2s var(--ease); }
   .foot-links a:hover { color: var(--ink); }
 
+  /* legal identity: who is behind the site, where they are, how to reach them */
+  .foot-legal {
+    border-top: 1px solid var(--line);
+    padding: 28px 0 48px;
+    display: flex; justify-content: space-between;
+    gap: 24px 48px; flex-wrap: wrap;
+    font-size: 13.5px; line-height: 1.65; color: var(--muted);
+  }
+  .foot-legal b { color: var(--ink); font-weight: 600; }
+  .foot-legal address { font-style: normal; margin: 0; }
+  .foot-legal a { text-decoration: none; transition: color .2s var(--ease); }
+  .foot-legal a:hover { color: var(--ink); }
+  @media (max-width: 640px) { .foot-legal { padding-bottom: 40px; } }
+
   /* ── scroll entry ────────────────────────────────────────────────────── */
   .rise { opacity: 0; transform: translateY(14px); }
   .rise.in {
@@ -674,6 +688,16 @@
         <a href="#cards">Cards</a>
         <a href="#occasions">Occasions</a>
       </div>
+    </div>
+
+    <div class="shell foot-legal">
+      <address>
+        <b>Avra</b> &mdash; operated by Prakhar Co<br>
+        226, Premnagar<br>
+        Bareilly, Uttar Pradesh 243001<br>
+        India
+      </address>
+      <p><a href="mailto:ph@avra.co.in">ph@avra.co.in</a></p>
     </div>
   </footer>
 
