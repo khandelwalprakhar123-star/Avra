@@ -255,14 +255,19 @@
   }
   .step h3 { font-size: 1.5rem; }
   .step p { margin-top: 10px; color: var(--muted); max-width: 48ch; }
+  /* Portrait, because the thumbs now hold actual cards rather than stock
+     landscape photos. `contain` over `cover`: the artwork is composed to its
+     own edges, and the three pieces are not one ratio — a square message
+     bubble beside two 2:3 cards. Cover would have taken 50% of each card's
+     height, leaving a band through the middle. The gradient mats the gap. */
   .step .thumb {
     border-radius: var(--r-card);
     border: 1px solid var(--line);
     overflow: hidden;
-    aspect-ratio: 4 / 3;
+    aspect-ratio: 3 / 4;
     background: linear-gradient(140deg, var(--accent-soft), var(--surface));
   }
-  .step .thumb img { width: 100%; height: 100%; object-fit: cover; }
+  .step .thumb img { width: 100%; height: 100%; object-fit: contain; }
   .step:nth-child(2) { padding-left: 44px; }
   @media (max-width: 900px) {
     .step { grid-template-columns: 52px 1fr; gap: 20px; padding: 28px 0; }
@@ -528,33 +533,36 @@
         <article class="step rise">
           <div class="ord">1</div>
           <div>
-            <h3>Describe it</h3>
+            <h3>Describe</h3>
             <p>Send a message with the occasion, the names and the date. Attach a photo of a card you liked, if you have one.</p>
           </div>
           <div class="thumb">
-            <img src="https://picsum.photos/seed/aangan-rangoli-detail/640/480" alt="Close detail of a rangoli pattern used on a card." loading="lazy" onerror="this.remove()">
+            <img src="img/step-describe.jpg" width="640" height="640" loading="lazy"
+                 alt="A chat message asking for a garden party invitation on 12 October at Windsor House, with roses in the background.">
           </div>
         </article>
 
         <article class="step rise">
           <div class="ord">2</div>
           <div>
-            <h3>Look at it</h3>
+            <h3>Inspect</h3>
             <p>A finished card comes back in about twenty seconds, at a size that prints cleanly or forwards to anyone.</p>
           </div>
           <div class="thumb">
-            <img src="https://picsum.photos/seed/aangan-wedding-gold/640/480" alt="A wedding card with a gold border." loading="lazy" onerror="this.remove()">
+            <img src="img/step-inspect.jpg" width="640" height="960" loading="lazy"
+                 alt="The card that came back: a Garden Party invitation in a painted garden of pale flowers, with the date and the Sharmas' number.">
           </div>
         </article>
 
         <article class="step rise">
           <div class="ord">3</div>
           <div>
-            <h3>Change it</h3>
+            <h3>Edit</h3>
             <p>Reply to the card saying what should be different. The wording, the colour, the flowers. The next one comes back changed.</p>
           </div>
           <div class="thumb">
-            <img src="https://picsum.photos/seed/aangan-lamps-blue/640/480" alt="Oil lamps against a deep blue background." loading="lazy" onerror="this.remove()">
+            <img src="img/step-edit.jpg" width="640" height="960" loading="lazy"
+                 alt="The same invitation after a reply: the garden is now banked with red and white roses.">
           </div>
         </article>
       </div>
