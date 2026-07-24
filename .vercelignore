@@ -1,0 +1,10 @@
+# This Vercel project publishes the landing page only. The WhatsApp bot runs
+# elsewhere, so none of its source belongs in the deployment — shipping the
+# whole repo is what put server.js, lib/, db/schema.sql and report.md on the
+# public URL. Keep this list in step with anything new added outside site/.
+
+server.js
+lib/
+db/
+report.md
+.env.example
