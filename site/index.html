@@ -196,6 +196,9 @@
 
   .hero-art { position: relative; }
   .hero-art .plate { transform: rotate(1.4deg); }
+  /* Match the artwork's own 768x1376, so `cover` has nothing to crop. At the
+     shared 2/3 it lost 8% off each end — the top bubble and the tablet edge. */
+  .hero-art .plate:not(.behind) { aspect-ratio: 768 / 1376; }
   .hero-art .plate.behind {
     position: absolute; inset: 0;
     transform: rotate(-3.2deg) translate(-22px, 14px) scale(.955);
@@ -506,9 +509,8 @@
           <img src="https://picsum.photos/seed/aangan-marigold-invite/900/1350" alt="" loading="lazy" onerror="this.remove()">
         </div>
         <div class="plate">
-          <img src="https://picsum.photos/seed/aangan-diwali-card-hero/900/1350"
-               alt="A Diwali card made on Avra, with lamps along the lower border."
-               onerror="this.remove()">
+          <img src="img/hero-card.jpg" width="768" height="1376"
+               alt="A woman holding a phone, a Diwali card and a trail of chat bubbles rising from it.">
         </div>
       </div>
     </div>
