@@ -84,7 +84,7 @@ across restarts, deploys, and `node --watch` reloads.
 | `lib/ratelimit.js` | Global daily spend cap, durable in Postgres. Reserve-then-settle against the real billed cost; fails **closed** if the ledger is unreachable. |
 | `lib/session.js` | **New for v1.1.** The edit loop's memory, backed by Postgres: which image a reply points at, session warmth, branching, finality. |
 | `db/schema.sql` | **New.** The three edit-loop tables, the `spend_ledger` table, and the `reserve_spend()` function. Run in the Supabase SQL editor; safe to re-run (see §5). |
-| `site/index.html` | The standalone "Aangan" marketing page. Not served by `server.js`. |
+| `site/index.html` | The standalone "Avra" marketing page. Not served by `server.js`. |
 | `.env` | All secrets. Git-ignored. Structure in §8. |
 | `.env.example` | Template with every variable documented, required and optional. |
 | `package.json` | 4 runtime deps: `openai`, `@supabase/supabase-js`, `express`, `twilio` (+ `dotenv`). |
